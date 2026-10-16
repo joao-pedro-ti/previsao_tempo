@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Previsão do Tempo por Tendências</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f4f7fb; --card:#fff; --tx:#1c2733; --mut:#6b7a8a; --acc:#2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1720; --card:#17212c; --tx:#e6edf3; --mut:#8b9bab; --acc:#60a5fa; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--tx); }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 1.5rem; margin: 0 0 16px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:16px; box-shadow:0 1px 4px #0001; }
+  input { width:100%; padding:12px; border-radius:8px; border:1px solid #8884; background:transparent; color:var(--tx); font-size:1rem; }
+  ul { list-style:none; margin:8px 0 0; padding:0; }
+  li button { width:100%; text-align:left; padding:10px; border:0; background:transparent; color:var(--tx); cursor:pointer; border-radius:6px; }
+  li button:hover { background:#8882; }
+  .days { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; }
+  .day { text-align:center; padding:12px 6px; border-radius:10px; background:#8881; }
+  .day b { display:block; margin-bottom:6px; }
+  .hi { font-size:1.3rem; font-weight:700; }
+  .lo, .mut { color:var(--mut); font-size:.85rem; }
+  .rain { color:var(--acc); font-weight:600; margin-top:6px; }
+  #msg { color:#dc2626; }
+  small { color:var(--mut); }
+</style>
+</head>
+<body>
+<main>
+  <h1>🌤️ Previsão do tempo por tendências reais</h1>
+  <div class="card">
+    <input id="q" placeholder="Digite uma cidade (ex.: Franca)" autocomplete="off">
+    <ul id="results"></ul>
+    <p id="msg"></p>
+  </div>
+  <div id="out" hidden>
+    <div class="card"><h2 id="place" style="margin-top:0"></h2><div class="days" id="days"></div></div>
+    <div class="card"><canvas id="chart" height="110"></canvas></div>
+    <div class="card"><b>Como é calculado</b>
+      <p id="diag" class="mut"></p>
+      <small>Modelo estatístico: clima normal da época (histórico de 5 anos) + desvio recente dos
+      últimos 14 dias + tendência, com a influência recente diminuindo ao longo dos dias. A linha tracejada é a
+      previsão de modelo numérico (Open-Meteo), mostrada apenas para comparação. Dados: Open-Meteo.</small>
+    </div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let timer, chart;
+
+$("q").addEventListener("input", () => {
+  clearTimeout(timer);
+  timer = setTimeout(search, 350);
+});
+
+async function search() {
+  const q = $("q").value.trim();
+  $("results").innerHTML = "";
+  if (q.length < 2) return;
+  const res = await fetch("/api/places?q=" + encodeURIComponent(q));
+  const data = await res.json();
+  if (data.error) return showError(data.error);
+  data.forEach(p => {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.textContent = [p.name, p.region, p.country].filter(Boolean).join(", ");
+    btn.onclick = () => load(p);
+    li.appendChild(btn);
+    $("results").appendChild(li);
+  });
+}
+
+function showError(text) { $("msg").textContent = text || ""; }
+
+async function load(p) {
+  showError("Calculando...");
+  $("results").innerHTML = "";
+  const res = await fetch(`/api/forecast?lat=${p.lat}&lon=${p.lon}`);
+  const data = await res.json();
+  if (data.error) return showError(data.error);
+  showError("");
+  render(p, data);
+}
+
+function weekday(iso) {
+  return new Date(iso + "T12:00:00").toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" });
+}
+
+function render(p, data) {
+  $("out").hidden = false;
+  $("place").textContent = [p.name, p.region].filter(Boolean).join(", ");
+  $("days").innerHTML = data.forecast.map(d => `
+    <div class="day">
+      <b>${weekday(d.date)}</b>
+      <div class="hi">${d.tmax}°</div>
+      <div class="lo">mín ${d.tmin}°</div>
+      <div class="mut">±${d.tmax_band}° / normal ${d.normal_tmax}°</div>
+      <div class="rain">🌧 ${d.rain_prob}% · ${d.rain_mm} mm</div>
+    </div>`).join("");
+
+  const labels = data.forecast.map(d => weekday(d.date));
+  if (chart) chart.destroy();
+  chart = new Chart($("chart"), {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "Máx (modelo)", data: data.forecast.map(d => d.tmax), borderColor: "#ef4444", tension: .3 },
+      { label: "Mín (modelo)", data: data.forecast.map(d => d.tmin), borderColor: "#3b82f6", tension: .3 },
+      { label: "Máx (referência numérica)", data: data.forecast.map(d => d.ref_tmax), borderColor: "#ef4444", borderDash: [6, 4], tension: .3 },
+      { label: "Mín (referência numérica)", data: data.forecast.map(d => d.ref_tmin), borderColor: "#3b82f6", borderDash: [6, 4], tension: .3 },
+    ]},
+    options: { plugins: { legend: { position: "bottom" } }, scales: { y: { title: { display: true, text: "°C" } } } }
+  });
+
+  const g = data.diagnostic;
+  const sign = v => (v > 0 ? "+" : "") + v;
+  $("diag").textContent =
+    `Últimos dias: máxima ${sign(g.anomalia_tmax)}°C e mínima ${sign(g.anomalia_tmin)}°C em relação ao normal; ` +
+    `tendência da máxima ${sign(g.tendencia_tmax_por_dia)}°C/dia; ${g.dias_chuvosos_ultimos_7} dia(s) de chuva nos últimos 7; ` +
+    `base histórica de ${g.anos_historico} anos.`;
+}
+</script>
+</body>
+</html>
